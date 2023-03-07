@@ -1,22 +1,28 @@
-package io.innocentdream.launcher;
+package io.innocentdream.launcher.launch;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import io.innocentdream.launcher.LauncherApplication;
+import io.innocentdream.launcher.LauncherWindow;
+import io.innocentdream.launcher.OS;
 import io.innocentdream.launcher.profile.Profile;
 import io.innocentdream.launcher.version.Version;
 import io.innocentdream.launcher.version.VersionManager;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
+import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.jar.JarEntry;
 
 public class Launcher {
+
+    public static final SimpleDateFormat FORMATTER = new SimpleDateFormat("HH:mm:ss");
 
     private final Profile profile;
     private boolean initialized;
@@ -43,38 +49,164 @@ public class Launcher {
         if (!initialized) initRunDir();
         Version version = VersionManager.getVersion(profile.version());
         String runDir = profile.customDir().isPresent() ? profile.customDir().get() : OS.getPath();
-        //Log4j XML
-        File log4jConfig = new File(runDir, "log4j.xml");
+        HashMap<String, String> env = new HashMap<>(System.getenv());
+        env.put("innocentdream.runDir", runDir);
+        PipedWriter writer = new PipedWriter();
+        if (profile.showLog()) {
+            LauncherWindow.mainWindow.logWindow = new LogWindow(profile.version());
+            try {
+                LogWindow.out = new BufferedReader(new PipedReader(writer));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        } else {
+            try {
+                new PipedReader(writer);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
         try {
-            InputStream is = new URL(version.log4jXML()).openStream();
-            Files.copy(is, log4jConfig.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            writer.write(print("ID Home: " + runDir, "INFO"));
+            writer.write(print("Java Home: " + LauncherApplication.JAVA_HOME, "INFO"));
+            //Log4j XML
+            File log4jConfig = new File(runDir, "log4j.xml");
+            try {
+                InputStream is = new URL(version.log4jXML()).openStream();
+                Files.copy(is, log4jConfig.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                writer.write(print("Couldn't get log4j.xml", "ERROR"));
+            }
+            env.put("log4j2.configurationFile", log4jConfig.getAbsolutePath());
+
+            //Args
+            List<String> args = new ArrayList<>();
+            for (int i = 0; i < version.runArgs().size(); i++) {
+                String arg = version.runArgs().get(i).replace("${runDir}", runDir).replace("${configFile}", log4jConfig.getAbsolutePath());
+                args.add(arg);
+            }
+            args.addAll(profile.jvmArgs());
+            StringBuilder argsBuilder = new StringBuilder(args.get(0));
+            for (int i = 1; i < args.size(); i++) {
+                argsBuilder.append(" ").append(args.get(i));
+            }
+            writer.write(print("Run arguments: " + argsBuilder, "INFO"));
+
+            //Jar
+            long jarFileSize = version.jarFileSize();
+            String jarDownload = version.jarFile();
+            File versionJar = new File(OS.getPath(), "versions/" + profile.version() + "/" + profile.version() + ".jar");
+            boolean downloadJar = false;
+            if (versionJar.exists()) {
+                if (jarFileSize < 0) {
+                    writer.write(print("Could not verify game's jar file", "WARN"));
+                } else if (jarFileSize != versionJar.length()) {
+                    writer.write(print("Jar file sizes don't match, expected" + jarFileSize + ", got " + versionJar.length(), "WARN"));
+                    downloadJar = true;
+                }
+            } else {
+                downloadJar = true;
+            }
+            if (downloadJar) {
+                try {
+                    InputStream is = new URL(jarDownload).openStream();
+                    Files.copy(is, versionJar.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    writer.write(print("Downloaded " + versionJar.getName(), "INFO"));
+                } catch (IOException e) {
+                    writer.write(print("Failed to download " + versionJar.getName() + " from " + jarDownload, "ERROR"));
+                    StackTraceElement[] trace = e.getStackTrace();
+                    for (StackTraceElement el : trace) {
+                        writer.write(printBasic("\t" + el.toString()));
+                    }
+                    return;
+                }
+            }
+            StringBuilder classpathBuilder = new StringBuilder(versionJar.getAbsolutePath());
+
+            //Jar Libs
+            File jarsFolder = new File(runDir, "libs/jars");
+            jarsFolder.mkdirs();
+            for (JsonObject object : version.jarLibraries()) {
+                String download = object.get("download").getAsString();
+                String name = object.get("name").getAsString();
+                long size = object.keySet().contains("size") ? object.get("size").getAsLong() : -1;
+                File jarFile = new File(jarsFolder, name);
+                boolean needsDownload = false;
+                if (jarFile.exists()) {
+                    if (size >= 0L && jarFile.length() == size) {
+                        //writer.write(print("Jar Library: " + name + " exists and is correct size", "INFO"));
+                    } else if (size == -1) {
+                        //writer.write(print("Jar Library: " + name + " exists, however size is not specified and is assumed to work", "WARN"));
+                    } else if (size >= 0L && jarFile.length() != size) {
+                        //writer.write(print("Jar Library: " + name + "exists, but is wrong size", "WARN"));
+                        needsDownload = true;
+                    }
+                } else {
+                    needsDownload = true;
+                }
+                if (needsDownload) {
+                    try {
+                        InputStream is = new URL(download).openStream();
+                        Files.copy(is, jarFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException e) {
+                        writer.write(print("Failed to download " + name + " from " + download, "ERROR"));
+                        StackTraceElement[] trace = e.getStackTrace();
+                        for (StackTraceElement el : trace) {
+                            writer.write(printBasic("\t" + el.toString()));
+                        }
+                        return;
+                    }
+                }
+                classpathBuilder.append(File.pathSeparatorChar).append(jarFile.getAbsolutePath());
+            }
+            ArrayList<String> envList = new ArrayList<>();
+            for (Map.Entry<String, String> e : env.entrySet()) {
+                envList.add(e.getKey() + "=" + e.getValue());
+            }
+
+            writer.write(print("Successfully verified Jar Libraries", "INFO"));
+            File java = new File(profile.customRuntime().isPresent() ? profile.customRuntime().get() : LauncherApplication.JAVA_HOME,
+                    "bin/javaw" + (OS.isWindows() ? ".exe" : ""));
+            String runCommand = "\"" + java.getAbsolutePath() + "\" " + argsBuilder + " -classpath " + classpathBuilder + " " + version.mainClass();
+            writer.flush();
+            Process process = Runtime.getRuntime().exec(runCommand, envList.toArray(new String[0]), new File(runDir));
+            LogWindow.out = process.inputReader();
+            LogWindow.err = process.errorReader();
+            if (profile.keepOpen() < 2 && profile.keepOpen() >= 0) {
+                LauncherWindow.mainWindow.setVisible(false);
+                try {
+                    System.out.println("Exit Code: " + process.waitFor());
+                } catch (InterruptedException e) {
+                    System.err.println("Error");
+                    e.printStackTrace();
+                }
+                if (profile.keepOpen() == 0) {
+                    LauncherWindow.mainWindow.dispose();
+                } else if (profile.keepOpen() == 1) {
+                    LauncherWindow.mainWindow.setVisible(true);
+                }
+            }
         } catch (IOException e) {
-            System.err.println("Couldn't load log4j.xml");
+            e.printStackTrace();
         }
+    }
 
-        //Args
-        List<String> args = new ArrayList<>();
-        for (int i = 0; i < version.runArgs().size(); i++) {
-            String arg = version.runArgs().get(i).replace("${runDir}", runDir).replace("${configFile}", log4jConfig.getAbsolutePath());
-            args.add(arg);
-        }
-        args.addAll(profile.jvmArgs());
-        StringBuilder argsBuilder = new StringBuilder(args.get(0));
-        for (int i = 1; i < args.size(); i++) {
-            argsBuilder.append(" ").append(args.get(i));
-        }
-        System.out.println("Run Arguments: " + argsBuilder);
+    private static String printBasic(String message) {
+        JsonObject data = new JsonObject();
+        data.add("basic", new JsonPrimitive(true));
+        data.add("message", new JsonPrimitive(message));
+        return data + "\n";
+    }
 
-        //Jar
-        StringBuilder builder = new StringBuilder();
-
-        //Jar Libs
-        File jarsFolder = new File(runDir, "libs/jars");
-        jarsFolder.mkdirs();
-        for (JsonObject object : version.jarLibraries()) {
-            String download = object.get("download").getAsString();
-            String name = object.get("name").getAsString();
-        }
+    private static String print(String message, String level) {
+        JsonObject data = new JsonObject();
+        data.add("basic", new JsonPrimitive(false));
+        data.add("time", new JsonPrimitive(FORMATTER.format(new Date())));
+        data.add("thread", new JsonPrimitive("LaunchThread"));
+        data.add("level", new JsonPrimitive(level));
+        data.add("logger", new JsonPrimitive("ID Launcher"));
+        data.add("message", new JsonPrimitive(message));
+        return data + "\n";
     }
 
 }

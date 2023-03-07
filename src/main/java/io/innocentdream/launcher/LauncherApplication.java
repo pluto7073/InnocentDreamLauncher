@@ -1,28 +1,52 @@
-package io.innocentdream.launcher.innocentdreamlauncher;
+package io.innocentdream.launcher;
 
-import javafx.application.Application;
-import javafx.fxml.FXMLLoader;
-import javafx.scene.Scene;
-import javafx.scene.image.Image;
-import javafx.stage.Stage;
+import io.innocentdream.launcher.profile.ProfileManager;
+import io.innocentdream.launcher.version.VersionManager;
 
+import javax.swing.*;
 import java.io.IOException;
-import java.util.Objects;
+import java.net.URL;
+import java.net.URLConnection;
 
-public class LauncherApplication extends Application {
-    @Override
-    public void start(Stage stage) throws IOException {
-        FXMLLoader fxmlLoader = new FXMLLoader(LauncherApplication.class.getResource("launcher-view.fxml"));
-        Scene scene = new Scene(fxmlLoader.load(), 900, 550);
+public class LauncherApplication {
 
-        stage.getIcons().add(new Image(getClass().getClassLoader().getResourceAsStream("assets/icon-512.png")));
+    public static final String VERSION = "v1.0";
+    public static boolean CONNECTED = testConnection();
+    public static final String ID_NEWS_URL = "https://jades-innocent-dream.tumblr.com/";
+    public static final String JAVA_HOME = System.getProperty("java.home");
 
-        stage.setTitle("Innocent Dream Launcher");
-        stage.setScene(scene);
-        stage.show();
+    public static boolean testConnection() {
+        try {
+            URL url = new URL("https://www.example.com/");
+            URLConnection connection = url.openConnection();
+            connection.connect();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     public static void main(String[] args) {
-        launch();
+        String javaVersion = System.getProperty("java.runtime.version");
+        String javaVendor = System.getProperty("java.vendor");
+        System.out.printf("Java Version: %s, %s, %s%n", javaVendor, System.getProperty("java.runtime.name"), javaVersion);
+        System.out.printf("System: %s, %s, %s\n", OS.OS, OS.VER, OS.ARCH);
+        long timeNano = System.nanoTime();
+        try {
+            if (OS.isWindows()) UIManager.setLookAndFeel("com.sun.java.swing.plaf.windows.WindowsLookAndFeel");
+            else if (OS.isLinux()) UIManager.setLookAndFeel("com.sun.java.swing.plaf.gtk.GTKLookAndFeel");
+        } catch (Exception e) {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+        }
+        VersionManager.loadVersions();
+        ProfileManager.initProfiles();
+        new LauncherWindow();
+        LauncherWindow.mainWindow.loadNews(null);
+        LauncherWindow.mainWindow.setVisible(true);
     }
+
 }
